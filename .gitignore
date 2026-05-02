@@ -1,0 +1,23 @@
+# Large data files
+MH_01_easy.zip
+MH_01_easy/
+DeepVIO/output/
+DeepVIO/unsplash-research-dataset-lite-latest.zip
+DeepVIO/unsplash-research-dataset-lite-latest/
+DeepVIO/datasetgen.blend1
+DeepVIO/__pycache__/
+__pycache__/
+
+# Blender backup files
+*.blend1
+
+# Python cache
+*.pyc
+*.pyo
+
+# Rendered output images
+*.png
+
+# Markdown (keep source, skip rendered notes)
+# (uncomment if desired)
+# *.md

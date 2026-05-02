@@ -1,0 +1,272 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage[caption=false]{subfig}
+
+% Correct hyphenation
+\hyphenation{op-tical net-works semi-conduc-tor}
+
+\begin{document}
+
+% Title
+\title{P4 - Deep and Un-Deep Visual Inertial Odometry}
+
+% Author names
+\author{
+\IEEEauthorblockN{Shakthibala Sivagami Balamurugan}
+\IEEEauthorblockA{Robotics Engineering\\
+Worcester Polytechnic Institute\\
+Email: sbalamurugan@wpi.edu}
+\and
+\IEEEauthorblockN{Aditya Patwardhan}
+\IEEEauthorblockA{Robotics Engineering\\
+Worcester Polytechnic Institute\\
+Email: apatwardhan@wpi.edu}
+\and 
+\IEEEauthorblockN{Bradley Kohler}
+\IEEEauthorblockA{Computer Science\\
+Worcester Polytechnic Institute\\
+Email: bkohler@wpi.edu}
+}
+
+% Make title
+\maketitle
+
+\begin{abstract}
+We present our implementation of a classical Visual-Inertial Odometry (VIO) system based on the Stereo Multi-State Constraint Kalman Filter (S-MSCKF)~\cite{sun2018}. The system tightly couples stereo camera observations with inertial measurements using an extended Kalman filter that maintains a sliding window of camera poses in its state vector. We detail the complete pipeline---IMU propagation via fourth-order Runge-Kutta integration, FAST feature detection with Lucas-Kanade tracking, and MSCKF measurement updates with nullspace projection---and evaluate it on the EuRoC MAV MH\_01\_easy sequence~\cite{burri2016}. We report rotation error, translation error, trajectory accuracy, scale drift, and relative pose errors, and discuss the practical considerations encountered during implementation.
+\end{abstract}
+
+\IEEEpeerreviewmaketitle
+
+\section{Introduction}
+
+Visual-Inertial Odometry (VIO) is a fundamental capability for autonomous navigation in GPS-denied environments. By fusing visual observations from cameras with inertial measurements from accelerometers and gyroscopes, VIO systems estimate the six degree-of-freedom pose of a moving platform with high accuracy and robustness.
+
+Among classical VIO approaches, the Multi-State Constraint Kalman Filter (MSCKF), introduced by Mourikis and Roumeliotis~\cite{mourikis2007}, is notable for its computational efficiency. Unlike feature-based SLAM methods that maintain landmark positions in the state vector---growing its dimension with each new feature---MSCKF marginalizes features out and instead maintains a sliding window of past camera poses. This keeps the state dimension bounded regardless of the number of tracked features, making it well-suited for real-time applications on resource-constrained platforms.
+
+Sun et al.~\cite{sun2018} extended MSCKF to use stereo camera observations (S-MSCKF), which provides metric scale observability without requiring the careful initialization procedures needed by monocular formulations. The algorithm has been widely adopted in the robotics community and has been demonstrated on micro aerial vehicles flying at speeds up to 17.5~m/s.
+
+In this project, we implement the S-MSCKF algorithm in Python, building on the open-source starter code adapted from the C++ implementation of Sun et al.~\cite{sun2018} by Kumar Robotics~\cite{kumarmsckf}. We evaluate the system on the EuRoC Micro Aerial Vehicle dataset~\cite{burri2016}, which provides time-synchronized stereo images, IMU measurements, and millimeter-accurate ground truth from a Vicon motion capture system.
+
+\section{Technical Approach}
+
+\subsection{System Overview}
+
+The S-MSCKF pipeline consists of four major components operating in a multi-threaded architecture: (1) an image processing front-end for feature detection and tracking, (2) an IMU prediction module, (3) the MSCKF filter for state estimation, and (4) a sliding window manager for camera state augmentation and pruning. The overall pipeline follows the structure described in~\cite{mourikis2007, sun2018}.
+
+\subsection{State Representation}
+
+The filter state consists of the IMU state $\mathbf{x}_I$ and a sliding window of $N$ camera states $\{\mathbf{x}_{C_1}, \ldots, \mathbf{x}_{C_N}\}$. Following the formulation in~\cite{mourikis2007}, the IMU error state is defined as:
+
+\begin{equation}
+\tilde{\mathbf{x}}_I = \begin{bmatrix} \delta\boldsymbol{\theta}_{IG}^\top & \tilde{\mathbf{b}}_g^\top & {}^G\tilde{\mathbf{v}}_I^\top & \tilde{\mathbf{b}}_a^\top & {}^G\tilde{\mathbf{p}}_I^\top & \delta\boldsymbol{\theta}_{CI}^\top & {}^I\tilde{\mathbf{p}}_C^\top \end{bmatrix}^\top
+\end{equation}
+
+\noindent where $\delta\boldsymbol{\theta}_{IG}$ is the orientation error (JPL quaternion convention~\cite{trawny2005}), $\tilde{\mathbf{b}}_g$ and $\tilde{\mathbf{b}}_a$ are the gyroscope and accelerometer bias errors, ${}^G\tilde{\mathbf{v}}_I$ and ${}^G\tilde{\mathbf{p}}_I$ are the velocity and position errors in the global frame, and $\delta\boldsymbol{\theta}_{CI}$, ${}^I\tilde{\mathbf{p}}_C$ represent the camera-to-IMU extrinsic calibration errors. Each camera state stores orientation and position errors, giving a total error state dimension of $21 + 6N$, where $N \leq 20$ is the sliding window size.
+
+\subsection{IMU Propagation}
+
+Between image frames, IMU measurements are integrated using fourth-order Runge-Kutta numerical integration, following Eq.~(1) in~\cite{mourikis2007}. The continuous-time IMU dynamics are:
+
+\begin{equation}
+\dot{\bar{q}} = \frac{1}{2} \boldsymbol{\Omega}(\hat{\boldsymbol{\omega}}) \bar{q}, \quad
+\dot{\mathbf{v}} = \mathbf{C}(\bar{q})^\top \hat{\mathbf{a}} + \mathbf{g}, \quad
+\dot{\mathbf{p}} = \mathbf{v}
+\end{equation}
+
+\noindent where $\hat{\boldsymbol{\omega}} = \boldsymbol{\omega}_m - \mathbf{b}_g$ is the bias-corrected angular velocity and $\hat{\mathbf{a}} = \mathbf{a}_m - \mathbf{b}_a$ is the bias-corrected linear acceleration. The error-state covariance is propagated using the linearized continuous-time error dynamics (Eq.~(3) in~\cite{mourikis2007}) with the discrete transition matrix $\boldsymbol{\Phi}$ computed via matrix exponential.
+
+The IMU noise parameters follow the EuRoC sensor specifications: gyroscope noise $\sigma_g = 0.005$~rad/s, accelerometer noise $\sigma_a = 0.05$~m/s$^2$, gyroscope bias random walk $\sigma_{bg} = 0.001$~rad/s, and accelerometer bias random walk $\sigma_{ba} = 0.01$~m/s$^2$.
+
+\subsection{Image Processing Front-End}
+
+Feature detection and tracking form the visual front-end of the pipeline:
+
+\begin{enumerate}
+\item \textbf{Detection}: FAST corner features~\cite{rosten2006} are detected on a $4 \times 5$ grid overlay to ensure uniform spatial distribution, with a maximum of 5 features per grid cell and a FAST threshold of 15.
+\item \textbf{Tracking}: Features are tracked between consecutive frames using the Lucas-Kanade (KLT) optical flow algorithm~\cite{lucas1981} with a 3-level image pyramid and $15 \times 15$ patch size. IMU-predicted rotation is used to initialize the optical flow search, reducing the search region and improving convergence.
+\item \textbf{Stereo Matching}: Tracked features in the left image are matched to the right image using optical flow along the epipolar line, with a stereo consistency threshold of 5 pixels.
+\item \textbf{Outlier Rejection}: Two-point RANSAC~\cite{fischler1981} is applied to reject outlier correspondences based on the epipolar constraint.
+\end{enumerate}
+
+\subsection{Feature Initialization}
+
+Before a feature can be used in the measurement update, its 3D position ${}^G\mathbf{p}_f$ must be estimated. We use Levenberg-Marquardt optimization with an inverse-depth parameterization, initialized by two-view triangulation from the first and last observations. A sufficient-motion check ensures that the feature has been observed with adequate baseline (translation) before triangulation is attempted.
+
+\subsection{Measurement Update}
+
+When a feature track is lost or the sliding window reaches its maximum size, the MSCKF measurement update is triggered. For a feature observed across $M$ camera states, the stereo measurement model is:
+
+\begin{equation}
+\mathbf{z}_i = \frac{1}{{}^{C_i}z_f} \begin{bmatrix} {}^{C_i}x_f \\ {}^{C_i}y_f \\ {}^{C_i}x_f + t_x \\ {}^{C_i}y_f + t_y \end{bmatrix}
++ \mathbf{n}_i
+\end{equation}
+
+\noindent where $(u, v)$ are normalized image coordinates for the left and right cameras, and $\mathbf{n}_i \sim \mathcal{N}(\mathbf{0}, \sigma_{obs}^2 \mathbf{I}_4)$ with $\sigma_{obs} = 0.035$~pixels.
+
+The measurement Jacobian $\mathbf{H}$ is decomposed into components with respect to the state ($\mathbf{H}_s$) and the feature position ($\mathbf{H}_f$). Following the key insight of MSCKF~\cite{mourikis2007}, the feature Jacobian is projected into the left nullspace of $\mathbf{H}_f$ to eliminate the feature position from the update:
+
+\begin{equation}
+\mathbf{r}_o = \mathbf{A}^\top \mathbf{r}, \quad \mathbf{H}_o = \mathbf{A}^\top \mathbf{H}_s
+\end{equation}
+
+\noindent where $\mathbf{A}$ spans the left nullspace of $\mathbf{H}_f$. A chi-squared gating test (95\% confidence) rejects outlier measurements. The state and covariance are updated using the standard Kalman filter equations with the Joseph-form covariance update for numerical stability.
+
+\subsection{State Management}
+
+State augmentation adds a new camera pose to the sliding window at each image timestamp, with the new state copied from the current IMU pose transformed by the camera-IMU extrinsic calibration. When the window exceeds the maximum size of 20 states, features tracked across the oldest states are used for measurement updates, and the corresponding camera states are then marginalized.
+
+\section{Dataset}
+
+We evaluate on the EuRoC MAV dataset~\cite{burri2016}, specifically the MH\_01\_easy sequence. This sequence was collected on a micro aerial vehicle flying through a machine hall environment at moderate speed with good visual texture. The dataset provides:
+
+\begin{itemize}
+\item Stereo grayscale images at 20~Hz from a global-shutter camera pair ($752 \times 480$ pixels)
+\item IMU measurements at 200~Hz (ADIS16448)
+\item Ground-truth poses from a Vicon motion capture system at 200~Hz (sub-millimeter accuracy)
+\end{itemize}
+
+The cameras use a pinhole projection model with radial-tangential distortion. Calibration parameters from Kalibr~\cite{kalibr} give left-camera intrinsics $f_x = 458.654$, $f_y = 457.296$, $c_x = 367.215$, $c_y = 248.375$ with distortion coefficients $[-0.28341, 0.07395, 0.00019, 0.00001]$.
+
+\section{Results and Analysis}
+
+\subsection{Trajectory Estimation}
+
+\begin{figure}[t]
+\centering
+\subfloat[XY plane]{
+\includegraphics[width=0.48\columnwidth]{3a_trajectory_xy.png}
+\label{fig:traj_xy}
+}
+\subfloat[XZ plane]{
+\includegraphics[width=0.48\columnwidth]{3b_trajectory_xz.png}
+\label{fig:traj_xz}
+}
+\caption{Estimated trajectory vs.\ ground truth for MH\_01\_easy. (a) Top-down view in the XY plane. (b) Side view in the XZ plane showing vertical motion.}
+\label{fig:trajectory}
+\end{figure}
+
+Fig.~\ref{fig:trajectory} compares the estimated trajectory against the Vicon ground truth. The XY projection (Fig.~\ref{fig:traj_xy}) shows that the filter tracks the horizontal motion pattern through the machine hall with good agreement. The XZ projection (Fig.~\ref{fig:traj_xz}) captures the vertical motion profile, though some drift is visible along the Z-axis over the course of the trajectory, as expected for a dead-reckoning system without loop closure.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\columnwidth]{sample_trajectory.png}
+\caption{3D trajectory visualization of the estimated path through the machine hall.}
+\label{fig:traj_3d}
+\end{figure}
+
+\subsection{Rotation Error}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\columnwidth]{1_rotation_error.png}
+\caption{Rotation error over time. The orientation estimate remains bounded throughout the sequence due to continuous visual corrections to the gyroscope-propagated state.}
+\label{fig:rot_err}
+\end{figure}
+
+Fig.~\ref{fig:rot_err} presents the rotation error over the sequence. The orientation estimate remains bounded, as the visual measurement updates continuously correct drift from gyroscope bias. This is a well-known strength of tightly-coupled VIO: the gyroscope provides smooth high-frequency orientation propagation, while visual features constrain the long-term drift~\cite{mourikis2007}.
+
+\subsection{Translation Error}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\columnwidth]{2_translation_error.png}
+\caption{Translation error over time. As expected for an odometry system, position error grows over the trajectory without loop closure.}
+\label{fig:trans_err}
+\end{figure}
+
+Fig.~\ref{fig:trans_err} shows the translation error. Position error grows over time, which is inherent to any odometry formulation that lacks loop closure or absolute position measurements. The rate of drift depends on the accuracy of feature triangulation and the quality of the IMU noise model.
+
+\subsection{Scale Drift}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\columnwidth]{4_scale_drift.png}
+\caption{Scale drift analysis. The stereo formulation maintains scale observability through stereo disparity, keeping the scale factor close to unity.}
+\label{fig:scale}
+\end{figure}
+
+Fig.~\ref{fig:scale} shows the scale consistency of the trajectory. Unlike monocular VIO, where scale is only weakly observable through accelerometer measurements~\cite{martinelli2014}, the stereo MSCKF directly recovers metric depth from stereo disparity. The scale factor remains close to unity throughout the sequence, confirming that the stereo baseline provides a strong scale constraint.
+
+\subsection{Relative Pose Errors}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\columnwidth]{5_relative_errors.png}
+\caption{Relative pose errors over sub-trajectories of varying lengths. This metric captures local estimation accuracy independent of global drift.}
+\label{fig:rpe}
+\end{figure}
+
+Fig.~\ref{fig:rpe} reports relative pose errors (RPE) computed over sub-trajectories of varying lengths, following the evaluation methodology of Sturm et al.~\cite{sturm2012}. RPE captures local accuracy independent of global drift accumulation. The errors grow sub-linearly with sub-trajectory length, indicating consistent local estimation quality.
+
+\section{Discussion}
+
+\textbf{Computational Efficiency.} A key advantage of MSCKF over filter-based SLAM (e.g., EKF-SLAM) is that the state dimension is bounded by the sliding window size, not the number of landmarks. With a maximum window of 20 camera states, the error state dimension is at most $21 + 120 = 141$, compared to $21 + 3L$ for EKF-SLAM with $L$ landmarks. This makes MSCKF practical for real-time deployment, which was the original motivation of Mourikis and Roumeliotis~\cite{mourikis2007}.
+
+\textbf{Observability.} The nullspace projection step is not merely a computational convenience---it also has implications for filter consistency. As shown by Hesch et al.~\cite{hesch2014}, naive EKF formulations can spuriously render the global yaw and position observable, leading to inconsistent estimates. The MSCKF nullspace projection helps preserve the correct unobservable subspace.
+
+\textbf{Limitations.} The main limitation of S-MSCKF as an odometry system is unbounded drift over long trajectories. Integrating loop closure (e.g., via bag-of-words place recognition~\cite{galvez2012}) or absolute position constraints (GPS) would be necessary for long-duration missions. Additionally, the FAST feature detector can struggle in textureless or highly repetitive environments, where learning-based feature detectors such as SuperPoint~\cite{detone2018} could improve robustness.
+
+\textbf{Implementation Notes.} The Python implementation, while faithful to the original C++ algorithm, runs slower than real-time due to the interpreted nature of Python and the lack of hardware-accelerated image processing. The original C++ implementation by Sun et al.~\cite{sun2018} runs in real-time on embedded platforms.
+
+\section{Conclusion}
+
+We implemented the Stereo MSCKF algorithm for visual-inertial odometry and evaluated it on the EuRoC MH\_01\_easy sequence. The system fuses stereo camera observations with IMU measurements in a tightly-coupled EKF framework with a bounded-dimension state vector. The results show bounded rotation error, metric scale consistency from stereo, and sub-linearly growing relative pose errors. As a well-established classical VIO approach, S-MSCKF provides a strong baseline against which learning-based methods can be compared in the second phase of this project.
+
+\section*{Acknowledgment}
+We thank Prof.~Nitin J. Sanket and Dr.~Lening Li for the course materials and starter code for RBE/CS~549. The S-MSCKF starter code is adapted from the Python reimplementation by~\cite{pymsckf} of the original C++ code by Kumar Robotics~\cite{kumarmsckf}.
+
+\begin{thebibliography}{99}
+
+\bibitem{mourikis2007}
+A.~I. Mourikis and S.~I. Roumeliotis, ``A multi-state constraint Kalman filter for vision-aided inertial navigation,'' in \emph{Proc.\ IEEE Int.\ Conf.\ Robotics and Automation (ICRA)}, pp.~3565--3572, 2007.
+
+\bibitem{sun2018}
+K.~Sun, K.~Mohta, B.~Pfrommer, M.~Watterson, S.~Liu, Y.~Mulgaonkar, C.~J. Taylor, and V.~Kumar, ``Robust stereo visual inertial odometry for fast autonomous flight,'' \emph{IEEE Robotics and Automation Letters}, vol.~3, no.~2, pp.~965--972, 2018.
+
+\bibitem{burri2016}
+M.~Burri, J.~Nikolic, P.~Gohl, T.~Schneider, J.~Rehder, S.~Omari, M.~W. Achtelik, and R.~Siegwart, ``The EuRoC micro aerial vehicle datasets,'' \emph{Int.\ J.\ Robotics Research}, vol.~35, no.~10, pp.~1157--1163, 2016.
+
+\bibitem{kalibr}
+J.~Rehder, J.~Nikolic, T.~Schneider, T.~Hinzmann, and R.~Siegwart, ``Extending Kalibr: Calibrating the extrinsics of multiple IMUs and of individual axes,'' in \emph{Proc.\ IEEE Int.\ Conf.\ Robotics and Automation (ICRA)}, pp.~4304--4311, 2016.
+
+\bibitem{trawny2005}
+N.~Trawny and S.~I. Roumeliotis, ``Indirect Kalman filter for 3D attitude estimation,'' Dept.\ of Computer Science \& Engineering, Univ.\ of Minnesota, Tech.\ Rep.~2005-002, 2005.
+
+\bibitem{rosten2006}
+E.~Rosten and T.~Drummond, ``Machine learning for high-speed corner detection,'' in \emph{Proc.\ European Conf.\ Computer Vision (ECCV)}, pp.~430--443, 2006.
+
+\bibitem{lucas1981}
+B.~D. Lucas and T.~Kanade, ``An iterative image registration technique with an application to stereo vision,'' in \emph{Proc.\ Int.\ Joint Conf.\ Artificial Intelligence (IJCAI)}, pp.~674--679, 1981.
+
+\bibitem{fischler1981}
+M.~A. Fischler and R.~C. Bolles, ``Random sample consensus: A paradigm for model fitting with applications to image analysis and automated cartography,'' \emph{Communications of the ACM}, vol.~24, no.~6, pp.~381--395, 1981.
+
+\bibitem{martinelli2014}
+A.~Martinelli, ``Visual-inertial structure from motion: Observability vs.\ minimum number of sensors,'' in \emph{Proc.\ IEEE Int.\ Conf.\ Robotics and Automation (ICRA)}, pp.~4407--4414, 2014.
+
+\bibitem{sturm2012}
+J.~Sturm, N.~Engelhard, F.~Endres, W.~Burgard, and D.~Cremers, ``A benchmark for the evaluation of RGB-D SLAM systems,'' in \emph{Proc.\ IEEE/RSJ Int.\ Conf.\ Intelligent Robots and Systems (IROS)}, pp.~573--580, 2012.
+
+\bibitem{hesch2014}
+J.~A. Hesch, D.~G. Kottas, S.~L. Bowman, and S.~I. Roumeliotis, ``Consistency analysis and improvement of vision-aided inertial navigation,'' \emph{IEEE Trans.\ Robotics}, vol.~30, no.~1, pp.~158--176, 2014.
+
+\bibitem{galvez2012}
+D.~G{\'a}lvez-L{\'o}pez and J.~D. Tard{\'o}s, ``Bags of binary words for fast place recognition in image sequences,'' \emph{IEEE Trans.\ Robotics}, vol.~28, no.~5, pp.~1188--1197, 2012.
+
+\bibitem{detone2018}
+D.~DeTone, T.~Malisiewicz, and A.~Rabinovich, ``SuperPoint: Self-supervised interest point detection and description,'' in \emph{Proc.\ IEEE Conf.\ Computer Vision and Pattern Recognition Workshops (CVPRW)}, pp.~224--236, 2018.
+
+\bibitem{kumarmsckf}
+Kumar Robotics, ``msckf\_vio,'' \url{https://github.com/KumarRobotics/msckf_vio}, 2018.
+
+\bibitem{pymsckf}
+uoip, ``stereo\_msckf,'' \url{https://github.com/uoip/stereo_msckf}, 2018.
+
+\end{thebibliography}
+
+\end{document}
