@@ -21,3 +21,6 @@ __pycache__/
 # Markdown (keep source, skip rendered notes)
 # (uncomment if desired)
 # *.md
+
+# Allow visualization figures
+!DeepVIO/visualizations/*.png
