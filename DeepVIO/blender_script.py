@@ -27,7 +27,7 @@ OUTPUT_DIR   = os.path.join(SCRIPT_DIR, "output")
 
 IMU_HZ    = 1000       # IMU sample rate (Hz)
 CAM_HZ    = 10         # Camera rate (Hz)
-DURATION  = 1.0        # Duration of the sequence in seconds
+DURATION  = 20.0        # Duration of the sequence in seconds
 
 PLANE_SIZE  = 200.0    # Floor plane size
 TILE_LONG_M = 200.0    # Metres per longest side of the texture tile
@@ -36,7 +36,10 @@ RENDER_W    = 640
 RENDER_H    = 480      
 
 # Trajectory choices: 'lissajous', 'spiral', 'figure8', 'linear'
-TRAJECTORY  = 'figure8'
+# Train/Val/Test trajectory splits (using available trajectory types)
+TRAIN_TRAJECTORIES = ['figure8', 'spiral', 'lissajous']
+VAL_TRAJECTORIES = ['linear']
+TEST_TRAJECTORIES = ['figure8']  # same type but different textures = unseen combos
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2. HELPER FUNCTIONS
@@ -209,7 +212,51 @@ def setup_scene(texture_path):
     sc.render.resolution_y = RENDER_H
     sc.render.image_settings.file_format = 'PNG'
 
+    # Add 3D obstacles for parallax/depth cues
+    add_3d_objects(n_objects=20, seed=hash(texture_path) % 10000)
+
     return cam_obj
+
+
+def add_3d_objects(n_objects=20, seed=42):
+    """Add random 3D objects on floor for parallax/depth cues."""
+    import random
+    random.seed(seed)
+    obj_mat = bpy.data.materials.new(name="ObjMat")
+    obj_mat.use_nodes = True
+    nt = obj_mat.node_tree
+    nt.nodes.clear()
+    out_nd = nt.nodes.new("ShaderNodeOutputMaterial")
+    emis_nd = nt.nodes.new("ShaderNodeEmission")
+    nt.links.new(emis_nd.outputs["Emission"], out_nd.inputs["Surface"])
+    for i in range(n_objects):
+        x = random.uniform(-80, 80)
+        y = random.uniform(-80, 80)
+        if abs(x) < 5 and abs(y) < 5:
+            x += 10
+        obj_type = random.choice(["cube", "cylinder", "cone", "cube", "cylinder"])
+        size = random.uniform(0.5, 4.0)
+        height = random.uniform(1.0, 6.0)
+        if obj_type == "cube":
+            bpy.ops.mesh.primitive_cube_add(size=size, location=(x, y, height/2))
+            obj = bpy.context.active_object
+            obj.scale = (1, 1, height/size)
+        elif obj_type == "cylinder":
+            bpy.ops.mesh.primitive_cylinder_add(radius=size/2, depth=height, location=(x, y, height/2))
+            obj = bpy.context.active_object
+        elif obj_type == "cone":
+            bpy.ops.mesh.primitive_cone_add(radius1=size, depth=height, location=(x, y, height/2))
+            obj = bpy.context.active_object
+        obj.name = f"Obstacle_{i:03d}"
+        mat_copy = obj_mat.copy()
+        mat_copy.name = f"ObjMat_{i:03d}"
+        nt2 = mat_copy.node_tree
+        emis = nt2.nodes.get("Emission")
+        if emis:
+            gray = random.uniform(0.1, 0.8)
+            emis.inputs["Color"].default_value = (gray, gray, gray, 1.0)
+        obj.data.materials.append(mat_copy)
+
 
 def set_camera_pose(cam_obj, pos_np, R_wb):
     mat = Matrix.Identity(4)
@@ -231,77 +278,92 @@ if not texture_files:
 else:
     print(f"Found {len(texture_files)} textures. Starting batch generation...")
 
-for seq_idx, tex_filename in enumerate(texture_files, start=1):
-    tex_path = os.path.join(TEXTURES_DIR, tex_filename)
-    print(f"\n--- Processing Sequence {seq_idx:03d} | Texture: {tex_filename} ---")
+# Generate dataset with train/val/test splits
+splits = [
+    ('train', TRAIN_TRAJECTORIES),
+    ('val', VAL_TRAJECTORIES),
+    ('test', TEST_TRAJECTORIES),
+]
+
+seq_counter = 0
+for split_name, traj_list in splits:
+    split_dir = os.path.join(OUTPUT_DIR, split_name)
+    os.makedirs(split_dir, exist_ok=True)
     
-    cam_obj = setup_scene(tex_path)
-    if not cam_obj:
-        print("Skipping due to scene setup failure.")
-        continue
+    split_seq = 0
+    for traj_name in traj_list:
+        for tex_filename in texture_files:
+            split_seq += 1
+            seq_counter += 1
+            tex_path = os.path.join(TEXTURES_DIR, tex_filename)
+            print(f"\n--- [{split_name}] Seq {split_seq:03d} | Traj: {traj_name} | Tex: {tex_filename} ---")
+            
+            cam_obj = setup_scene(tex_path)
+            if not cam_obj:
+                print("Skipping due to scene setup failure.")
+                continue
 
-    pos, rpy = make_trajectory(TRAJECTORY, N_IMU, DT)
-    acc_ideal, gyro_ideal = compute_imu_ideal(pos, rpy, DT)
+            pos, rpy = make_trajectory(traj_name, N_IMU, DT)
+            acc_ideal, gyro_ideal = compute_imu_ideal(pos, rpy, DT)
+            acc_noisy = acc_gen(IMU_HZ, acc_ideal, accel_mid_accuracy)
+            gyro_noisy = gyro_gen(IMU_HZ, gyro_ideal, gyro_mid_accuracy)
+            timestamps = np.arange(N_IMU) * DT
 
-    # Re-generating noise inside the loop ensures each sequence has unique random walks
-    acc_noisy  = acc_gen(IMU_HZ, acc_ideal, accel_mid_accuracy)
-    gyro_noisy = gyro_gen(IMU_HZ, gyro_ideal, gyro_mid_accuracy)
+            seq_dir = os.path.join(split_dir, f"seq_{split_seq:03d}")
+            img_dir = os.path.join(seq_dir, "images")
+            os.makedirs(img_dir, exist_ok=True)
 
-    timestamps = np.arange(N_IMU) * DT
+            # Write IMU data
+            imu_csv = os.path.join(seq_dir, "imu.csv")
+            with open(imu_csv, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['timestamp', 'gyro_x', 'gyro_y', 'gyro_z', 'acc_x', 'acc_y', 'acc_z'])
+                for i in range(N_IMU):
+                    w.writerow([f"{timestamps[i]:.6f}",
+                                *[f"{v:.8f}" for v in gyro_noisy[i]],
+                                *[f"{v:.8f}" for v in acc_noisy[i]]])
 
-    seq_dir = os.path.join(OUTPUT_DIR, f"seq_{seq_idx:03d}")
-    img_dir = os.path.join(seq_dir, "images")
-    os.makedirs(img_dir, exist_ok=True)
+            cam_frames = list(range(0, N_IMU, CAM_STEP))
+            gt_rows, rel_rows = [], []
+            prev_R = prev_p = None
 
-    # Write IMU data
-    imu_csv = os.path.join(seq_dir, "imu.csv")
-    with open(imu_csv, 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(['timestamp', 'gyro_x', 'gyro_y', 'gyro_z', 'acc_x', 'acc_y', 'acc_z'])
-        for i in range(N_IMU):
-            w.writerow([f"{timestamps[i]:.6f}",
-                        *[f"{v:.8f}" for v in gyro_noisy[i]],
-                        *[f"{v:.8f}" for v in acc_noisy[i]]])
+            for frame_idx, step_i in enumerate(cam_frames):
+                t = timestamps[step_i]
+                p = pos[step_i]
+                r, pv, yv = rpy[step_i]
+                R_wb = R_from_rpy(r, pv, yv)
+                qx, qy, qz, qw = R_to_quat(R_wb)
 
-    cam_frames = list(range(0, N_IMU, CAM_STEP))
-    gt_rows, rel_rows = [], []
-    prev_R = prev_p = None
+                gt_rows.append([f"{t:.6f}", f"{p[0]:.8f}", f"{p[1]:.8f}", f"{p[2]:.8f}",
+                                 f"{qx:.8f}", f"{qy:.8f}", f"{qz:.8f}", f"{qw:.8f}"])
 
-    for frame_idx, step_i in enumerate(cam_frames):
-        t = timestamps[step_i]
-        p = pos[step_i]
-        r, pv, yv = rpy[step_i]
-        R_wb = R_from_rpy(r, pv, yv)
-        qx, qy, qz, qw = R_to_quat(R_wb)
+                if prev_R is not None:
+                    R_rel = prev_R.T @ R_wb
+                    t_rel = prev_R.T @ (p - prev_p)
+                    rqx, rqy, rqz, rqw = R_to_quat(R_rel)
+                    rel_rows.append([f"{t:.6f}",
+                                     f"{t_rel[0]:.8f}", f"{t_rel[1]:.8f}", f"{t_rel[2]:.8f}",
+                                     f"{rqx:.8f}", f"{rqy:.8f}", f"{rqz:.8f}", f"{rqw:.8f}"])
+                prev_R, prev_p = R_wb.copy(), p.copy()
 
-        gt_rows.append([f"{t:.6f}", f"{p[0]:.8f}", f"{p[1]:.8f}", f"{p[2]:.8f}",
-                         f"{qx:.8f}", f"{qy:.8f}", f"{qz:.8f}", f"{qw:.8f}"])
+                set_camera_pose(cam_obj, p, R_wb)
+                bpy.context.view_layer.update()
 
-        if prev_R is not None:
-            R_rel = prev_R.T @ R_wb
-            t_rel = prev_R.T @ (p - prev_p)
-            rqx, rqy, rqz, rqw = R_to_quat(R_rel)
-            rel_rows.append([f"{t:.6f}",
-                             f"{t_rel[0]:.8f}", f"{t_rel[1]:.8f}", f"{t_rel[2]:.8f}",
-                             f"{rqx:.8f}", f"{rqy:.8f}", f"{rqz:.8f}", f"{rqw:.8f}"])
-        prev_R, prev_p = R_wb.copy(), p.copy()
+                bpy.context.scene.render.filepath = os.path.join(img_dir, f"{frame_idx:05d}.png")
+                bpy.ops.render.render(write_still=True)
 
-        set_camera_pose(cam_obj, p, R_wb)
-        bpy.context.view_layer.update()
+            with open(os.path.join(seq_dir, "groundtruth.csv"), 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['timestamp', 'tx', 'ty', 'tz', 'qx', 'qy', 'qz', 'qw'])
+                w.writerows(gt_rows)
 
-        bpy.context.scene.render.filepath = os.path.join(img_dir, f"{frame_idx:05d}.png")
-        bpy.ops.render.render(write_still=True)
+            with open(os.path.join(seq_dir, "relative_poses.csv"), 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['timestamp', 'dtx', 'dty', 'dtz', 'dqx', 'dqy', 'dqz', 'dqw'])
+                w.writerows(rel_rows)
 
-    with open(os.path.join(seq_dir, "groundtruth.csv"), 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(['timestamp', 'tx', 'ty', 'tz', 'qx', 'qy', 'qz', 'qw'])
-        w.writerows(gt_rows)
+            print(f"[{split_name}] Seq {split_seq:03d} complete.")
+    
+    print(f"\n=== {split_name.upper()} split done: {split_seq} sequences ===")
 
-    with open(os.path.join(seq_dir, "relative_poses.csv"), 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(['timestamp', 'dtx', 'dty', 'dtz', 'dqx', 'dqy', 'dqz', 'dqw'])
-        w.writerows(rel_rows)
-
-    print(f"Sequence {seq_idx:03d} complete. Saved to {seq_dir}")
-
-print("\n--- All sequences processed successfully! ---")
+print(f"\n--- All {seq_counter} sequences processed successfully! ---")
