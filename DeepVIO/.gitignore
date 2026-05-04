@@ -1,2 +1,9 @@
-*.png
-*.md
+# Allow visualizations and docs
+!*.png
+!*.md
+
+# Ignore generated data
+output/
+__pycache__/
+*.pyc
+*.blend1
