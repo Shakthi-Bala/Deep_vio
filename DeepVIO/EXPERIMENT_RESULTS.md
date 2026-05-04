@@ -151,8 +151,8 @@ output/
 
 ```bash
 # SSH to lab laptop
-ssh adipat@192.168.1.185
-# password: 4829
+ssh <user>@<lab-machine>
+# (see private team notes for credentials)
 
 # Check if experiments are still running
 ps aux | grep overnight

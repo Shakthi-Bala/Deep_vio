@@ -18,7 +18,7 @@ cd DeepVIO
 # Install dependencies
 pip install torch torchvision numpy scipy opencv-python matplotlib
 
-# Data is generated on the lab machine (192.168.1.185)
+# Data is generated on the lab machine
 # Copy it or regenerate using:
 #   blender --background --python blender_script.py
 #   python3 cleanup_bad_sequences.py
@@ -301,7 +301,7 @@ After each experiment, fill in:
 ## Notes
 
 - All training is on the **new dataset** (bad textures removed, 3D objects added)
-- Lab machine: `ssh adipat@192.168.1.185` (pw: 4829)
+- Lab machine: (see private team notes for SSH details)
 - GPU: RTX 5060 (8GB) — batch size 32 is safe for combined model
 - Each training run takes ~15-30 min with early stopping
 - Checkpoints save automatically — just note which `checkpoints/exp_*` dir to look at
