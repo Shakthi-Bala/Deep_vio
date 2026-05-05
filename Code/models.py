@@ -4,18 +4,21 @@ import torch.nn.functional as F
 
 
 class VisionEncoder(nn.Module):
-    def __init__(self, in_channels=6):
+    def __init__(self, in_channels=6, dropout=0.3):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, 32, 7, stride=2, padding=3),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout),
             nn.Conv2d(32, 64, 5, stride=2, padding=2),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout),
             nn.Conv2d(64, 128, 3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout),
             nn.Conv2d(128, 256, 3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),

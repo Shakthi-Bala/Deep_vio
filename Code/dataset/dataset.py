@@ -3,14 +3,15 @@ import os
 import re
 from io import StringIO
 
-import cv2
+from PIL import Image
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 
 class SyntheticVIODataset(Dataset):
-    def __init__(self, root_dir, split="train", mode="vio", transforms=None):
+    def __init__(self, root_dir, split="train", mode="vio", transforms=None,
+                 sample_split=True, seed=42):
         self.root_dir = root_dir
         self.mode = mode
         self.transforms = transforms
@@ -18,23 +19,52 @@ class SyntheticVIODataset(Dataset):
 
         sequence_paths = self._discover_sequences(root_dir)
         if sequence_paths:
-            sequence_paths = self._split_paths(sequence_paths, split)
-            for seq_path in sequence_paths:
-                self._load_directory_sequence(seq_path)
+            if sample_split and len(sequence_paths) > 1:
+                # Load every sequence, then split at the sample level so all
+                # scenes appear in both train and val.
+                for seq_path in sequence_paths:
+                    self._load_directory_sequence(seq_path)
+                self.data = self._sample_split(self.data, split, seed)
+            else:
+                sequence_paths = self._split_paths(sequence_paths, split)
+                for seq_path in sequence_paths:
+                    self._load_directory_sequence(seq_path)
         else:
             npz_files = sorted(glob.glob(os.path.join(root_dir, "sequence_*.npz")))
             npz_files = self._split_paths(npz_files, split)
             for file_path in npz_files:
                 self._load_npz_sequence(file_path)
 
+    def _sample_split(self, data, split, seed):
+        rng = np.random.default_rng(seed)
+        indices = np.arange(len(data))
+        rng.shuffle(indices)
+        n = len(indices)
+        train_end = int(0.8 * n)
+        val_end   = int(0.9 * n)
+        if split == "train":
+            chosen = indices[:train_end]
+        elif split == "val":
+            chosen = indices[train_end:val_end]
+        else:
+            chosen = indices[val_end:]
+        return [data[i] for i in chosen]
+
     def _split_paths(self, paths, split):
         if not paths:
             return []
+        n = len(paths)
+        if n == 1:
+            # Only one sequence: use it for all splits
+            return paths
+        train_end = max(1, int(0.8 * n))
+        val_end = max(train_end + 1, int(0.9 * n))
+        val_end = min(val_end, n)
         if split == "train":
-            return paths[: int(0.8 * len(paths))]
+            return paths[:train_end]
         elif split == "val":
-            return paths[int(0.8 * len(paths)) : int(0.9 * len(paths))]
-        return paths[int(0.9 * len(paths)) :]
+            return paths[train_end:val_end]
+        return paths[val_end:]
 
     def _discover_sequences(self, root_dir):
         if self._is_sequence_dir(root_dir):
@@ -42,8 +72,15 @@ class SyntheticVIODataset(Dataset):
         sequence_dirs = []
         for entry in sorted(os.listdir(root_dir)):
             entry_path = os.path.join(root_dir, entry)
-            if os.path.isdir(entry_path) and self._is_sequence_dir(entry_path):
+            if not os.path.isdir(entry_path):
+                continue
+            if self._is_sequence_dir(entry_path):
                 sequence_dirs.append(entry_path)
+            else:
+                for sub in sorted(os.listdir(entry_path)):
+                    sub_path = os.path.join(entry_path, sub)
+                    if os.path.isdir(sub_path) and self._is_sequence_dir(sub_path):
+                        sequence_dirs.append(sub_path)
         return sequence_dirs
 
     def _is_sequence_dir(self, path):
@@ -193,11 +230,8 @@ class SyntheticVIODataset(Dataset):
 
     def _load_image(self, image_data):
         if isinstance(image_data, str):
-            image = cv2.imread(image_data, cv2.IMREAD_COLOR)
-            if image is None:
-                raise FileNotFoundError(f"Unable to load image: {image_data}")
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            return image.astype(np.float32) / 255.0
+            image = Image.open(image_data).convert("RGB")
+            return np.array(image, dtype=np.float32) / 255.0
         return image_data
 
     def __len__(self):
